@@ -1,120 +1,313 @@
 <?php
 
+namespace App\Http\Controllers\User;
 
-Route::namespace('User\Auth')->name('user.')->group(function () {
+use App\Models\Form;
+use App\Models\Plan;
+use App\Models\Proof;
+use App\Models\Report;
+use App\Models\Deposit;
+use App\Models\Service;
+use App\Models\Category;
+use App\Lib\FormProcessor;
+use App\Models\ServiceView;
+use App\Models\Transaction;
+use Illuminate\Http\Request;
+use App\Rules\FileTypeValidate;
+use App\Lib\GoogleAuthenticator;
+use App\Http\Controllers\Controller;
 
-    Route::controller('LoginController')->group(function(){
-        Route::get('/login', 'showLoginForm')->name('login');
-        Route::post('/login', 'login');
-        Route::get('logout', 'logout')->name('logout');
-    });
+class UserController extends Controller
+{
+    public function home()
+    {
+        $pageTitle = 'Dashboard';
+        $user = auth()->user();
 
-    Route::controller('RegisterController')->group(function(){
-        Route::get('register', 'showRegistrationForm')->name('register');
-        Route::post('register', 'register')->middleware('registration.status');
-        Route::post('check-mail', 'checkUser')->name('checkUser');
-    });
+    // Monthly Deposit  Report Graph
+     $deposits = Deposit::selectRaw("SUM(amount) as amount, MONTHNAME(created_at) as month_name, MONTH(created_at) as month_num")
+        ->whereYear('created_at', date('Y'))
+        ->whereStatus(1)
+        ->where('user_id',$user->id)
+        ->groupBy('month_name', 'month_num')
+        ->orderBy('month_num')
+        ->get();
 
-    Route::controller('ForgotPasswordController')->group(function(){
-        Route::get('password/reset', 'showLinkRequestForm')->name('password.request');
-        Route::post('password/email', 'sendResetCodeEmail')->name('password.email');
-        Route::get('password/code-verify', 'codeVerify')->name('password.code.verify');
-        Route::post('password/verify-code', 'verifyCode')->name('password.verify.code');
-    });
-    Route::controller('ResetPasswordController')->group(function(){
-        Route::post('password/reset', 'reset')->name('password.update');
-        Route::get('password/reset/{token}', 'showResetForm')->name('password.reset');
-    });
-});
+      $depositsChart['labels'] = $deposits->pluck('month_name');
+      $depositsChart['values'] = $deposits->pluck('amount');
 
-Route::middleware('auth')->name('user.')->group(function () {
-    //authorization
-    Route::namespace('User')->controller('AuthorizationController')->group(function(){
-        Route::get('authorization', 'authorizeForm')->name('authorization');
-        Route::get('resend/verify/{type}', 'sendVerifyCode')->name('send.verify.code');
-        Route::post('verify/email', 'emailVerification')->name('verify.email');
-        Route::post('verify/mobile', 'mobileVerification')->name('verify.mobile');
-        Route::post('verify/g2fa', 'g2faVerification')->name('go2fa.verify');
-    });
+      $widget['total_services'] = Service::where('user_id',$user->id)->count();
+      $widget['pending_services'] = Service::where('user_id',$user->id)->where('status',0)->count();
 
-    Route::middleware(['check.status'])->group(function () {
+    return view($this->activeTemplate . 'user.dashboard', compact('pageTitle','depositsChart','widget'));
+    }
 
-        Route::get('user/data', 'User\UserController@userData')->name('data');
-        Route::post('user/data/submit', 'User\UserController@userDataSubmit')->name('data.submit');
+    public function depositHistory(Request $request)
+    {
+        $pageTitle = 'Deposit History';
+        $deposits = auth()->user()->deposits();
+        if ($request->search) {
+            $deposits = $deposits->where('trx',$request->search);
+        }
+        $deposits = $deposits->with(['gateway'])->orderBy('id','desc')->paginate(getPaginate());
+        return view($this->activeTemplate.'user.deposit_history', compact('pageTitle', 'deposits'));
+    }
 
-        Route::middleware('registration.complete')->namespace('User')->group(function () {
+    public function show2faForm()
+    {
+        $general = gs();
+        $ga = new GoogleAuthenticator();
+        $user = auth()->user();
+        $secret = $ga->createSecret();
+        $qrCodeUrl = $ga->getQRCodeGoogleUrl($user->username . '@' . $general->site_name, $secret);
+        $pageTitle = '2FA Setting';
+        return view($this->activeTemplate.'user.twofactor', compact('pageTitle', 'secret', 'qrCodeUrl'));
+    }
 
-            Route::controller('UserController')->group(function(){
-                Route::get('dashboard', 'home')->name('home');
+    public function create2fa(Request $request)
+    {
+        $user = auth()->user();
+        $this->validate($request, [
+            'key' => 'required',
+            'code' => 'required',
+        ]);
+        $response = verifyG2fa($user,$request->code,$request->key);
+        if ($response) {
+            $user->tsc = $request->key;
+            $user->ts = 1;
+            $user->save();
+            $notify[] = ['success', 'Google authenticator activated successfully'];
+            return back()->withNotify($notify);
+        } else {
+            $notify[] = ['error', 'Wrong verification code'];
+            return back()->withNotify($notify);
+        }
+    }
 
-                //2FA
-                Route::get('twofactor', 'show2faForm')->name('twofactor');
-                Route::post('twofactor/enable', 'create2fa')->name('twofactor.enable');
-                Route::post('twofactor/disable', 'disable2fa')->name('twofactor.disable');
+    public function disable2fa(Request $request)
+    {
+        $this->validate($request, [
+            'code' => 'required',
+        ]);
 
-                //Report
-                Route::any('deposit/history', 'depositHistory')->name('deposit.history');
-                Route::get('transactions','transactions')->name('transactions');
+        $user = auth()->user();
+        $response = verifyG2fa($user,$request->code);
+        if ($response) {
+            $user->tsc = null;
+            $user->ts = 0;
+            $user->save();
+            $notify[] = ['success', 'Two factor authenticator deactivated successfully'];
+        } else {
+            $notify[] = ['error', 'Wrong verification code'];
+        }
+        return back()->withNotify($notify);
+    }
 
-                // plan
-                Route::get('/plan','plan')->name('plan');
+    public function transactions(Request $request)
+    {
+        $pageTitle = 'Transactions';
+        $remarks = Transaction::distinct('remark')->orderBy('remark')->get('remark');
+        $transactions = Transaction::where('user_id',auth()->id());
 
-                // fetch all post
-                Route::get('/all-post','fetchPost')->name('fetch.post');
-                Route::get('/post/{slug}/{id}','postDetails')->name('post.details');
-                Route::post('post/view/confirm', 'confirm')->name('post.confrim');
-                Route::post('follow/start', 'startFollow')->name('follow.start');
-                Route::post('/post/report','postReport')->name('post.report');
+        if ($request->search) {
+            $transactions = $transactions->where('trx',$request->search);
+        }
+
+        if ($request->type) {
+            $transactions = $transactions->where('trx_type',$request->type);
+        }
+
+        if ($request->remark) {
+            $transactions = $transactions->where('remark',$request->remark);
+        }
+
+        $transactions = $transactions->orderBy('id','desc')->paginate(getPaginate());
+        return view($this->activeTemplate.'user.transactions', compact('pageTitle','transactions','remarks'));
+    }
 
 
-                Route::get('attachment-download/{fil_hash}','attachmentDownload')->name('attachment.download');
-            });
-            
-            Route::controller('ProofController')->group(function(){
-                Route::get('proof/{id}', 'show')->name('proof.show');
-            });
+    public function attachmentDownload($fileHash)
+    {
+        $filePath = decrypt($fileHash);
+        $extension = pathinfo($filePath, PATHINFO_EXTENSION);
+        $general = gs();
+        $title = slug($general->site_name).'- attachments.'.$extension;
+        $mimetype = mime_content_type($filePath);
+        header('Content-Disposition: attachment; filename="' . $title);
+        header("Content-Type: " . $mimetype);
+        return readfile($filePath);
+    }
 
-            //Profile setting
-            Route::controller('ProfileController')->group(function(){
-                Route::get('profile/setting', 'profile')->name('profile.setting');
-                Route::post('profile/setting', 'submitProfile');
-                Route::get('change-password', 'changePassword')->name('change.password');
-                Route::post('change-password', 'submitPassword');
-            });
+    public function userData()
+    {
+        $user = auth()->user();
+        if ($user->reg_step == 1) {
+            return to_route('user.home');
+        }
+        $pageTitle = 'User Data';
+        return view($this->activeTemplate.'user.user_data', compact('pageTitle','user'));
+    }
 
-            // service
-            Route::controller('ServiceController')->prefix('service')->name('service.')->group(function(){
-                Route::get('/', 'index')->name('index');
-                Route::get('create', 'create')->name('create');
-                Route::post('store', 'store')->name('store');
-                Route::get('edit/{id}', 'edit')->name('edit');
-                Route::post('update/{id}', 'update')->name('update');
+    public function userDataSubmit(Request $request)
+    {
+        $user = auth()->user();
+        if ($user->reg_step == 1) {
+            return to_route('user.home');
+        }
+        $request->validate([
+            'firstname'=>'required',
+            'lastname'=>'required',
+        ]);
+        $user->firstname = $request->firstname;
+        $user->lastname = $request->lastname;
+        $user->address = [
+            'country'=>@$user->address->country,
+            'address'=>$request->address,
+            'state'=>$request->state,
+            'zip'=>$request->zip,
+            'city'=>$request->city,
+        ];
+        $user->reg_step = 1;
+        $user->save();
 
-                Route::get('pending', 'pending')->name('pending');
-                Route::get('active', 'active')->name('active');
-                
-                Route::get('proofs/{id}', 'proofs')->name('proofs');
+        $notify[] = ['success','Registration process completed successfully'];
+        return to_route('user.home')->withNotify($notify);
 
-            });
+    }
 
-            //affiliate
-            Route::controller('AffiliateController')->group(function(){
-                Route::get('reffered', 'reffered')->name('reffered');
-                Route::get('reffered-commissions', 'refferedCommission')->name('reffered.commission');
-                Route::post('reffer-link', 'refferlinkSend')->name('refferlink.send');
 
-            });
+    public function plan(){
+        $pageTitle = 'By Credits';
+        $plans = Plan::where('status',1)->latest()->paginate(getPaginate());
+        return view($this->activeTemplate.'user.plan',compact('pageTitle','plans'));
+    }
 
-        });
+    public function fetchPost(){
+        $pageTitle = 'Post Lists';
+        $services = Service::with('category')->where('status',1)->where('user_id','!=',auth()->user()->id)->inRandomOrder()->latest()->limit(100)->get();
+        $viewed  = ServiceView::where('user_id',auth()->user()->id)->pluck('service_id')->toArray();
+        return view($this->activeTemplate.'user.services.all_posts',compact('pageTitle','services','viewed'));
+    }
 
-        // Payment
-        Route::middleware('registration.complete')->controller('Gateway\PaymentController')->group(function(){
-            Route::get('payment/{id}', 'payment')->name('payment');
-            Route::any('/deposit', 'deposit')->name('deposit');
-            Route::post('deposit/insert', 'depositInsert')->name('deposit.insert');
-            Route::get('deposit/confirm', 'depositConfirm')->name('deposit.confirm');
-            Route::get('deposit/manual', 'manualDepositConfirm')->name('deposit.manual.confirm');
-            Route::post('deposit/manual', 'manualDepositUpdate')->name('deposit.manual.update');
-        });
-    });
-});
+    public function postDetails($slug,$id){
+        $service = Service::findOrFail($id);
+        $user = auth()->user();
+        $pageTitle = $service->name;
+        $categories = Category::where('status',1)->latest()->get();
+        return view($this->activeTemplate.'user.services.details',compact('pageTitle','service','categories','user'));
+    }
+
+    public function startFollow(Request $request)
+    {
+        $request->validate([
+            'service_id' => 'required|integer|exists:services,id',
+        ]);
+
+        $service = Service::findOrFail($request->service_id);
+        $user = auth()->user();
+
+        $username = $this->extractUsername($service->link);
+        $client = new \App\Services\CountikClient();
+        $followers = $client->fetchFollowerCount($username);
+
+        $serviceView = ServiceView::firstOrNew([
+            'user_id' => $user->id,
+            'service_id' => $service->id,
+        ]);
+
+        $serviceView->start_followers = $followers;
+        $serviceView->save();
+
+        return response()->json(['success' => true]);
+    }
+
+    public function confirm(Request $request){
+
+        $request->validate([
+            'service_id' => 'required|integer|exists:services,id',
+            'screenshot' => ['required', 'image', new FileTypeValidate(['jpg','jpeg','png'])],
+        ]);
+
+        $user = auth()->user();
+        $service = Service::findOrFail($request->service_id);
+        $serviceView = ServiceView::where('user_id',$user->id)->where('service_id',$request->service_id)->first();
+
+        if(!$serviceView){
+            $notify[] = ['error', 'Please start the follow process before confirming.'];
+            return back()->withNotify($notify);
+        }
+
+        if($serviceView->end_followers){
+            $notify[] = ['error', 'You have already completed the task for this post.'];
+            return back()->withNotify($notify);
+        }
+
+        $username = $this->extractUsername($service->link);
+        $client = new \App\Services\CountikClient();
+        $newCount = $client->fetchFollowerCount($username);
+
+        if($newCount <= $serviceView->start_followers){
+            $notify[] = ['error', 'Follower count did not increase. Please retry.'];
+            return back()->withNotify($notify);
+        }
+
+        $filename = fileUploader($request->screenshot, getFilePath('serviceProof'));
+        $proof = new Proof();
+        $proof->user_id = $user->id;
+        $proof->service_id = $request->service_id;
+        $proof->screenshort = $filename;
+        $proof->save();
+        
+
+        $serviceView->end_followers = $newCount;
+        $serviceView->view_date = Date('Y-m-d');
+        $serviceView->credits = gs()->add_credits;
+        $serviceView->save();
+
+        $user->credits += gs()->add_credits;
+
+        $user->save();
+
+        $notify[] = ['success','Screenshort submitted'];
+        return back()->withNotify($notify);
+    }
+
+    public function postReport(Request $request){
+
+        $request->validate([
+            'report' => 'required'
+        ]);
+
+        $user = auth()->user();
+        $exist = Report::where('user_id',$user->id)->where('service_id',$request->service_id)->first();
+        $existServiceView = ServiceView::where('user_id',$user->id)->where('service_id',$request->service_id)->first();
+
+        if($exist){
+            $notify[] = ['error', 'You have already submitted the report for this post.'];
+            return back()->withNotify($notify);
+        }
+
+        if(!$existServiceView){
+            $notify[] = ['error', 'Please complete the task before submitting a report.'];
+            return back()->withNotify($notify);
+        }
+
+        $report =  new Report();
+        $report->user_id = $user->id;
+        $report->service_id = $request->service_id;
+        $report->report = $request->report;
+        $report->save();
+
+        $notify[] = ['success','Report submitted'];
+        return back()->withNotify($notify);
+    }
+
+    private function extractUsername(string $url): string
+    {
+        if (preg_match('/@([A-Za-z0-9_.-]+)/', $url, $m)) {
+            return $m[1];
+        }
+        return $url;
+    }
+
+}
