@@ -302,12 +302,20 @@ class UserController extends Controller
         return back()->withNotify($notify);
     }
 
-    private function extractUsername(string $url): string
+     private function extractUsername(string $url): string
     {
+        // Handle Countik style URLs such as https://countik.com/user/@username
+        if (preg_match('/\/user\/@([^\/?]+)/', $url, $m)) {
+            return ltrim($m[1], '@');
+        }
+
         if (preg_match('/@([A-Za-z0-9_.-]+)/', $url, $m)) {
             return $m[1];
         }
-        return $url;
+
+        return ltrim($url, '@');
     }
+
+
 
 }
