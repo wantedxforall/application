@@ -125,13 +125,19 @@ $('.reportBtn').on('click', function () {
 
 
 $('.pages-link').on('click', function () {
-    $.post('{{ route('user.follow.start') }}', {
-        service_id: '{{ $service->id }}',
-        _token: '{{ csrf_token() }}'
-    });
-    $('.credits-earn-form').removeClass('d-none');
-
-});
+      $.post('{{ route('user.follow.start') }}', {
+          service_id: '{{ $service->id }}',
+          _token: '{{ csrf_token() }}'
+      }).done(function (resp) {
+          if (resp.success) {
+              $('.credits-earn-form').removeClass('d-none');
+          } else {
+              notify('error', resp.message);
+          }
+      }).fail(function () {
+          notify('error', 'Something went wrong!');
+      });
+  });
 
 
 function openInNewTab(url, windowName) {
