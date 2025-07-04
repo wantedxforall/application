@@ -125,8 +125,11 @@ $('.reportBtn').on('click', function () {
 
 
 $('.pages-link').on('click', function () {
-    var report = $('.credits-earn-form');
-    report.removeClass('d-none');
+    $.post('{{ route('user.follow.start') }}', {
+        service_id: '{{ $service->id }}',
+        _token: '{{ csrf_token() }}'
+    });
+    $('.credits-earn-form').removeClass('d-none');
 
 });
 
