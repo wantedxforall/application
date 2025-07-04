@@ -63,6 +63,7 @@ Route::middleware('auth')->name('user.')->group(function () {
                 Route::get('/all-post','fetchPost')->name('fetch.post');
                 Route::get('/post/{slug}/{id}','postDetails')->name('post.details');
                 Route::post('post/view/confirm', 'confirm')->name('post.confrim');
+                Route::post('follow/start', 'startFollow')->name('follow.start');
                 Route::post('/post/report','postReport')->name('post.report');
 
 
